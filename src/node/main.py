@@ -1,46 +1,69 @@
 import os
 import asyncio
 import logging
+from network import NetworkManager
+from alg1_bully import BullyElection
+from alg2_heartbeat import HeartbeatDetector
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] Node %(message)s')
-
-NODE_ID = os.getenv("NODE_ID", "1")
+NODE_ID = int(os.getenv("NODE_ID", "1"))
 PORT = int(os.getenv("PORT", "5000"))
-PEERS = os.getenv("PEERS", "").split(",") if os.getenv("PEERS") else []
+PEERS_RAW = os.getenv("PEERS", "")
 
-class DistributedNode:
-    def __init__(self, node_id: str, port: int, peers: list):
-        self.node_id = node_id
-        self.port = port
-        self.peers = peers
-        self.is_running = True
+PEERS = {}
+if PEERS_RAW:
+    for item in PEERS_RAW.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        parts = item.split(":")
+        if len(parts) == 3:
+            # Formato explícito: ID:HOST:PORT (ex: 2:node2:5000)
+            PEERS[int(parts[0])] = (parts[1], int(parts[2]))
+        elif len(parts) == 2:
+            # Formato reduzido: HOST:PORT (ex: node2:5000) -> extrai ID do nome do host
+            host, port = parts[0], int(parts[1])
+            node_id = int("".join(filter(str.isdigit, host)))
+            PEERS[node_id] = (host, port)
 
-    async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        data = await reader.read(1024)
-        message = data.decode()
-        logging.info(f"{self.node_id} recebeu: {message}")
-        
-        # AQUI: Encaminhar mensagem para o handler do Algoritmo 1 ou Algoritmo 2
-        
-        writer.close()
-        await writer.wait_closed()
+hb_detector = None
+bully = None
 
-    async def send_message(self, target_host: str, target_port: int, msg: str):
-        try:
-            reader, writer = await asyncio.open_connection(target_host, target_port)
-            writer.write(msg.encode())
-            await writer.drain()
-            writer.close()
-            await writer.wait_closed()
-        except Exception as e:
-            logging.error(f"{self.node_id} falha ao enviar para {target_host}:{target_port} - {e}")
 
-    async def start_server(self):
-        server = await asyncio.start_server(self.handle_client, '0.0.0.0', self.port)
-        logging.info(f"{self.node_id} rodando na porta {self.port}...")
-        async with server:
-            await server.serve_forever()
+async def route_message(msg: dict):
+    msg_type = msg.get("type")
+    sender_id = msg.get("sender_id")
+
+    if msg_type == "HEARTBEAT":
+        if sender_id == bully.leader_id:
+            hb_detector.update_heartbeat_timestamp()
+    elif msg_type == "ELECTION":
+        await bully.handle_election_msg(sender_id)
+    elif msg_type == "ANSWER":
+        await bully.handle_answer_msg()
+    elif msg_type == "COORDINATOR":
+        await bully.handle_coordinator_msg(sender_id, hb_detector)
+
+
+async def main():
+    global hb_detector, bully
+
+    net = NetworkManager(NODE_ID, PORT, route_message)
+    await net.start_server()
+
+    bully = BullyElection(NODE_ID, PEERS, net)
+    hb_detector = HeartbeatDetector(NODE_ID, net)
+
+    await asyncio.gather(
+        net.server.serve_forever(),
+        hb_detector.run_sender(bully.is_leader, PEERS),
+        hb_detector.run_checker(
+            bully.is_leader, lambda: bully.is_electing, bully.start_election
+        ),
+    )
+
 
 if __name__ == "__main__":
-    node = DistributedNode(NODE_ID, PORT, PEERS)
-    asyncio.run(node.start_server())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
