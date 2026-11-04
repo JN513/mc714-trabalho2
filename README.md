@@ -81,7 +81,7 @@ docker compose down -v
 
 ---
 
-## 🧪 Testes Unitários
+## Testes Unitários
 
 Os testes unitários validam a corretude das transições de estado dos algoritmos de forma isolada, sem necessidade dos contêineres ativos.
 
