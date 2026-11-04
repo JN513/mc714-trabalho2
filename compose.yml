@@ -1,0 +1,34 @@
+services:
+  node1:
+    build: ./src
+    container_name: node1
+    environment:
+      - NODE_ID=1
+      - PORT=5000
+      - PEERS=node2:5000,node3:5000
+    networks:
+      - ds-net
+
+  node2:
+    build: ./src
+    container_name: node2
+    environment:
+      - NODE_ID=2
+      - PORT=5000
+      - PEERS=node1:5000,node3:5000
+    networks:
+      - ds-net
+
+  node3:
+    build: ./src
+    container_name: node3
+    environment:
+      - NODE_ID=3
+      - PORT=5000
+      - PEERS=node1:5000,node2:5000
+    networks:
+      - ds-net
+
+networks:
+  ds-net:
+    driver: bridge
