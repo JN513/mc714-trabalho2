@@ -4,6 +4,14 @@ import logging
 
 
 class HeartbeatDetector:
+    """Detector de falhas baseado em heartbeat.
+
+    O líder envia mensagens ``HEARTBEAT`` a cada ``interval`` segundos. Cada
+    seguidor registra o instante do último heartbeat recebido do líder atual e,
+    caso o intervalo exceda ``timeout``, considera o líder falho (modelo
+    crash-stop) e dispara o callback de eleição.
+    """
+
     def __init__(
         self, node_id: int, network: object, interval: float = 1.0, timeout: float = 3.0
     ):
@@ -33,7 +41,9 @@ class HeartbeatDetector:
                 elapsed = time.time() - self.last_heartbeat
                 if elapsed > self.timeout:
                     logging.warning(
-                        f"Node {self.node_id}: Timeout de heartbeat ({elapsed:.2f}s)! Iniciando eleição."
+                        f"HEARTBEAT_TIMEOUT node={self.node_id} "
+                        f"epoch={time.time():.6f} elapsed={elapsed:.3f} "
+                        f"timeout={self.timeout:.3f}"
                     )
                     await on_timeout_callback()
 

@@ -218,3 +218,17 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Trabalho 2 - artefatos gerados
+experiments/compose.gen.yml
+experiments/compose.safety.yml
+relatorio/*.aux
+relatorio/*.log
+relatorio/*.out
+relatorio/*.bbl
+relatorio/*.blg
+relatorio/*.fls
+relatorio/*.fdb_latexmk
+relatorio/*.synctex.gz
+MC714___Sistemas_Distribuidos___Trabalho_1
+RESUMO.md

@@ -1,0 +1,6 @@
+scenario,n_nodes,rep,n_txn,aborts,commits,atomic
+participant_crash,3,1,5,5,0,1
+participant_crash,3,2,5,5,0,1
+participant_crash,3,3,5,5,0,1
+participant_crash,3,4,5,5,0,1
+participant_crash,3,5,5,5,0,1

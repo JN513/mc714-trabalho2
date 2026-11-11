@@ -1,0 +1,24 @@
+{
+  "observation_seconds": 20.0,
+  "expected_leader": 3,
+  "nodes": {
+    "1": {
+      "leader": 3,
+      "elections_total": 0,
+      "elections_after_stable": 0
+    },
+    "2": {
+      "leader": 3,
+      "elections_total": 0,
+      "elections_after_stable": 0
+    },
+    "3": {
+      "leader": 3,
+      "elections_total": 0,
+      "elections_after_stable": 0
+    }
+  },
+  "elections_after_stable": 0,
+  "leaders_agree": true,
+  "safety_ok": true
+}

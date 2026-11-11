@@ -10,11 +10,21 @@ logging.basicConfig(
 
 
 class NetworkManager:
+    """Camada de comunicação assíncrona ponto a ponto sobre TCP.
+
+    Cada mensagem é um documento JSON delimitado por uma conexão TCP de vida
+    curta (abre, escreve, fecha). A camada também mantém contadores de tráfego
+    usados para medir a complexidade de mensagens dos algoritmos.
+    """
+
     def __init__(self, node_id: int, port: int, handler_callback):
         self.node_id = node_id
         self.port = port
         self.handler_callback = handler_callback
         self.server = None
+        # Contadores de tráfego (instrumentação para a análise experimental).
+        self.messages_sent = 0
+        self.messages_received = 0
 
     async def start_server(self):
         self.server = await asyncio.start_server(
@@ -29,6 +39,7 @@ class NetworkManager:
             data = await reader.read(2048)
             if data:
                 message = json.loads(data.decode("utf-8"))
+                self.messages_received += 1
                 await self.handler_callback(message)
         except Exception as e:
             logging.error(f"Erro ao processar mensagem recebida: {e}")
@@ -43,6 +54,7 @@ class NetworkManager:
             await writer.drain()
             writer.close()
             await writer.wait_closed()
+            self.messages_sent += 1
             return True
         except Exception:
             return False

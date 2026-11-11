@@ -4,10 +4,19 @@ import logging
 from network import NetworkManager
 from alg1_bully import BullyElection
 from alg2_heartbeat import HeartbeatDetector
+from alg3_2pc import TwoPhaseCommit, KeyValueStore
 
 NODE_ID = int(os.getenv("NODE_ID", "1"))
 PORT = int(os.getenv("PORT", "5000"))
 PEERS_RAW = os.getenv("PEERS", "")
+HEARTBEAT_INTERVAL = float(os.getenv("HEARTBEAT_INTERVAL", "1.0"))
+HEARTBEAT_TIMEOUT = float(os.getenv("HEARTBEAT_TIMEOUT", "3.0"))
+ELECTION_TIMEOUT = float(os.getenv("ELECTION_TIMEOUT", "2.0"))
+BOOTSTRAP_DELAY = float(os.getenv("BOOTSTRAP_DELAY", "2.0"))
+VOTE_TIMEOUT = float(os.getenv("VOTE_TIMEOUT", "2.0"))
+DECISION_TIMEOUT = float(os.getenv("DECISION_TIMEOUT", "3.0"))
+CRASH_AFTER_PREPARE = os.getenv("CRASH_AFTER_PREPARE", "0") == "1"
+PARTICIPANT_VOTE_NO = os.getenv("PARTICIPANT_VOTE_NO", "0") == "1"
 
 PEERS = {}
 if PEERS_RAW:
@@ -27,12 +36,14 @@ if PEERS_RAW:
 
 hb_detector = None
 bully = None
+tpc = None
 
 
 async def route_message(msg: dict):
     msg_type = msg.get("type")
     sender_id = msg.get("sender_id")
 
+    # --- Eleição (Bully) e detecção de falhas (Heartbeat) ---
     if msg_type == "HEARTBEAT":
         if sender_id == bully.leader_id:
             hb_detector.update_heartbeat_timestamp()
@@ -43,15 +54,44 @@ async def route_message(msg: dict):
     elif msg_type == "COORDINATOR":
         await bully.handle_coordinator_msg(sender_id, hb_detector)
 
+    # --- Compromisso atômico (2PC) ---
+    elif msg_type == "TXN":
+        await tpc.handle_client_txn(msg.get("ops", []), sender_id)
+    elif msg_type == "PREPARE":
+        await tpc.handle_prepare(msg["txn_id"], msg.get("ops", []), sender_id)
+    elif msg_type == "VOTE":
+        await tpc.handle_vote(msg["txn_id"], msg["vote"], sender_id)
+    elif msg_type == "DECISION":
+        await tpc.handle_decision(msg["txn_id"], msg["decision"])
+    elif msg_type == "QUERY":
+        await tpc.handle_query(msg["txn_id"], sender_id)
+    elif msg_type == "STATE":
+        await tpc.handle_state(msg["txn_id"], msg["state"], sender_id)
+    elif msg_type == "SNAPSHOT":
+        await tpc.handle_snapshot()
+
 
 async def main():
-    global hb_detector, bully
+    global hb_detector, bully, tpc
 
     net = NetworkManager(NODE_ID, PORT, route_message)
     await net.start_server()
 
-    bully = BullyElection(NODE_ID, PEERS, net)
-    hb_detector = HeartbeatDetector(NODE_ID, net)
+    bully = BullyElection(NODE_ID, PEERS, net, election_timeout=ELECTION_TIMEOUT)
+    hb_detector = HeartbeatDetector(
+        NODE_ID, net, interval=HEARTBEAT_INTERVAL, timeout=HEARTBEAT_TIMEOUT
+    )
+    tpc = TwoPhaseCommit(
+        NODE_ID,
+        PEERS,
+        net,
+        KeyValueStore(),
+        get_leader_id=lambda: bully.leader_id,
+        vote_timeout=VOTE_TIMEOUT,
+        decision_timeout=DECISION_TIMEOUT,
+        crash_after_prepare=CRASH_AFTER_PREPARE,
+        participant_vote_no=PARTICIPANT_VOTE_NO,
+    )
 
     await asyncio.gather(
         net.server.serve_forever(),
@@ -59,6 +99,10 @@ async def main():
         hb_detector.run_checker(
             bully.is_leader, lambda: bully.is_electing, bully.start_election
         ),
+        # Eleição de inicialização/recuperação (crash-recovery).
+        bully.bootstrap(BOOTSTRAP_DELAY),
+        # Protocolo de terminação cooperativo do 2PC.
+        tpc.run_termination_monitor(),
     )
 
 
