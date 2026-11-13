@@ -36,11 +36,11 @@ pela interface de rede da aplicação (TCP + JSON sobre `asyncio`).
 
 ```text
 .
-├── compose.yml                     # Cluster padrão de 3 nós (compose.yaml)
+├── compose.yaml                    # Cluster padrão de 3 nós
 ├── pytest.ini                      # Configuração do Pytest (modo asyncio)
 ├── requirements.txt                # Dependências do projeto
 ├── Trabalho2-MC714_2s2026.pdf      # Enunciado da avaliação
-├── report.pdf                      # Relatório técnico (cópia)
+├── relatorio.pdf                   # Relatório técnico (cópia)
 ├── relatorio/
 │   ├── relatorio.tex               # Fonte IEEE do relatório
 │   └── figures/                    # Figuras geradas pelos experimentos
@@ -197,4 +197,4 @@ terminação cooperativo resolve a transação quando o coordenador reinicia
 
 * **Alunos:** Matheus Veiga Luchi (269494) e Julio Nunes Avelar (241163)
 * **Link para o Vídeo de Demonstração:** _(preencher)_
-* **Link para o Repositório:** _(preencher)_
+* **Link para o Repositório:** https://github.com/JN513/mc714-trabalho2
