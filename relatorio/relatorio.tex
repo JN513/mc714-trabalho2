@@ -10,325 +10,154 @@
 \usepackage{cite}
 \usepackage{microtype}
 \usepackage{xcolor}
-\usepackage{siunitx}
-\sisetup{output-decimal-marker={,},detect-all}
 
 \begin{document}
 
-\title{Implementação e Avaliação de Eleição de Líder (Bully) e\\
-Detecção de Falhas por Heartbeat em um Cluster Containerizado}
+\title{Eleição de Líder (Bully) e Detecção de Falhas\\por Heartbeat em um Cluster Containerizado}
 
-\author{Matheus Veiga Luchi (269494), Julio Nunes Avelar (241163)%
-\thanks{Repositório (GitLab da disciplina): \protect\url{https://gitlab.ic.unicamp.br/.../mc714-trabalho2}.
-Vídeo de demonstração: \protect\url{https://...}.}}
+\author{Matheus Veiga Luchi (RA: 269494) \qquad Julio Nunes Avelar (RA: 241163)\\[0.4em]
+\small Repositório: \url{https://github.com/JN513/mc714-trabalho2}\\[0.15em]
+\small Vídeo de demonstração: \url{https://...}}
 
 \markboth{MC714 - Sistemas Distribuídos - Trabalho 2}{Eleição de Líder e Detecção de Falhas}
 
 \maketitle
 
 \begin{abstract}
-Este trabalho apresenta a implementação e a avaliação experimental de dois
-algoritmos distribuídos complementares: o \emph{Algoritmo do Valentão} (Bully)
-para eleição de líder e um \emph{detector de falhas baseado em heartbeat}. Os
-dois algoritmos são integrados em um cluster de nós independentes executados
-como contêineres OCI orquestrados por Docker Compose v2, comunicando-se
-exclusivamente por TCP com mensagens JSON assíncronas (\texttt{asyncio}). O
-modelo adotado é parcialmente síncrono, com falhas do tipo \emph{crash-stop} e
-\emph{crash-recovery}. As propriedades de correção (segurança --- no máximo um
-coordenador; vivacidade --- o maior ID vivo acaba eleito) são verificadas por
-testes unitários e por testes de integração com rede em memória. Na avaliação
-experimental, variou-se o limiar de heartbeat (\qtylist{1;2;3;5}{\second}) e o
-número de nós ($N \in \{3,4,5\}$) com réplicas independentes, medindo tempo de
-reconvergência, sua decomposição (detecção e eleição), a complexidade de
-mensagens e o tempo de recuperação, com percentis p50/p95 e intervalos de
-confiança de 95\%. Os resultados mostram que a reconvergência é dominada pela
-soma do limiar de detecção com a espera da eleição ($T_{hb}+T_{ele}$), que o
-custo de mensagens cresce de forma quadrática com $N$, e que a recuperação do líder ocorre em menos de um segundo neste ambiente.
-Discute-se ainda uma armadilha de medição: o uso de
-\texttt{docker stop} incluiria o \emph{grace period} de \qty{10}{\second}
-(ignorado pelo processo PID~1), inflando artificialmente os tempos. Como
-atividade de bônus, integra-se um terceiro algoritmo de \emph{compromisso
-atômico} --- \emph{Two-Phase Commit} (2PC) --- coordenado pelo líder eleito,
-investigando atomicidade sob falhas e a clássica limitação de bloqueio do 2PC.
+Neste trabalho, exploramos na prática como garantir a coordenação contínua em sistemas distribuídos combinando dois algoritmos fundamentais: o Algoritmo do Valentão (Bully) para eleição de líder e um detector de falhas periódico baseado em batimentos cardíacos (heartbeat). Construímos o cluster com nós independentes empacotados em contêineres Docker, comunicando-se exclusivamente via TCP com mensagens JSON assíncronas por meio do \texttt{asyncio}. Adotamos o modelo parcialmente síncrono para tratar paradas definitivas (\emph{crash-stop}) e reinicializações de nós (\emph{crash-recovery}). Verificamos a correção com testes unitários e testes de integração em memória, assegurando as propriedades de segurança (nunca há mais de um líder aceito ao mesmo tempo) e vivacidade (o nó ativo com maior identificador sempre assume o comando). Em nossos experimentos, variamos o tempo limite de detecção entre 1, 2, 3 e 5\,s e o tamanho do cluster entre 3, 4 e 5 nós, registrando tempos de reconvergência, custos de rede e recuperação com percentis p50/p95 e intervalos de confiança de 95\%. Os resultados mostram que a reconvergência é dominada pela soma do tempo de detecção com o intervalo de espera da eleição ($T_{hb}+T_{ele}$), que o tráfego de mensagens cresce no padrão quadrático $O(N^2)$, e que um líder reiniciado recupera seu papel em menos de um segundo neste ambiente. Discutimos também um detalhe prático de medição: usar \texttt{docker stop} incluiria dez segundos de espera desnecessários devido ao tratamento de sinais no Python, algo que contornamos com paradas diretas via \texttt{docker kill}. Por fim, como atividade extra, integramos o protocolo de compromisso atômico Two-Phase Commit (2PC) sob comando do líder eleito, ilustrando a garantia de atomicidade sob falhas e comprovando na prática o bloqueio dos nós quando o coordenador cai.
 \end{abstract}
 
 \IEEEpeerreviewmaketitle
 
 \section{Introdução}
-A coordenação de sistemas distribuídos depende frequentemente da escolha de um
-único processo que centralize uma função crítica --- o \emph{coordenador} ou
-\emph{líder}. Exemplos incluem a eleição de um \emph{primary} em replicação
-baseada em primário-\emph{backup} e a escolha de um nó controlador em sistemas
-de exclusão mútua centralizada. Para que essa coordenação seja robusta, dois
-problemas clássicos devem ser resolvidos de forma combinada: (i) \emph{eleição
-de líder}, que determina qual nó vivo assume a coordenação, e (ii)
-\emph{detecção de falhas}, que percebe a queda do líder e dispara uma nova
-eleição.
+Quem estuda sistemas distribuídos logo percebe um desafio comum: muitas vezes precisamos de um nó central responsável por tomar decisões ou organizar o trabalho do grupo, o chamado coordenador ou líder. Esse líder é peça essencial em esquemas de replicação com primário e backup, ou em protocolos de exclusão mútua onde apenas um participante pode acessar um recurso compartilhado por vez. No entanto, se esse coordenador falhar, o sistema inteiro pode parar. Por isso, manter um cluster funcionando exige resolver dois problemas que andam de mãos dadas: primeiro, como perceber rapidamente que o líder parou de responder (detecção de falhas), e segundo, como fazer os nós restantes entrarem em acordo para escolher um novo substituto (eleição de líder).
 
-Este trabalho implementa e avalia dois algoritmos que pertencem a esses dois
-temas exigidos no enunciado: o \emph{Algoritmo do Valentão} (\emph{Bully}),
-dentro do tema de eleição, e um \emph{detector de falhas por heartbeat}, dentro
-do tema de detecção de falhas. Ambos são complementares: o detector dispara a
-eleição quando o líder para de enviar batimentos, e a eleição reconverge o
-cluster para um novo coordenador. As contribuições são:
+Para responder a essas perguntas na prática, implementamos e avaliamos dois algoritmos clássicos que se complementam perfeitamente: o \emph{Algoritmo do Valentão} (\emph{Bully}), dentro do tema de eleição, e um \emph{detector de falhas por heartbeat}, dentro do tema de detecção de falhas. A dinâmica entre eles é direta e intuitiva: os nós seguidores monitoram os batimentos periódicos do líder. Se esses batimentos pararem por um tempo limite configurado, o detector dispara o alarme e inicia o processo de eleição, permitindo que o cluster encontre um novo coordenador e volte à estabilidade. Nossas principais contribuições neste projeto são:
 
 \begin{enumerate}
-    \item uma implementação assíncrona, containerizada e reproduzível dos dois
-    algoritmos, com parâmetros de temporização configuráveis;
-    \item um modelo de sistema explicitado (sincronia, canais, falhas,
-    relógios) e as propriedades de segurança e vivacidade associadas;
-    \item uma suíte de testes que verifica as transições de estado e, por meio
-    de uma rede em memória, a segurança, a vivacidade e o \emph{crash-recovery};
-    \item uma avaliação experimental automatizada que varia o limiar de
-    heartbeat e o número de nós, medindo reconvergência (com decomposição
-    detecção/eleição), custo de mensagens e recuperação, com percentis e
-    intervalos de confiança;
-    \item (bônus) um terceiro algoritmo de compromisso atômico --- 2PC ---
-    coordenado pelo líder eleito, com análise de atomicidade sob falhas e da
-    limitação de bloqueio.
+    \item uma implementação assíncrona, modular e reproduzível dos dois algoritmos em Python, com temporizadores totalmente configuráveis,
+    \item a definição clara do modelo de sistema adotado, explicitando as hipóteses de sincronia, garantias de comunicação e propriedades formais de segurança e vivacidade,
+    \item uma suíte com 20 testes automatizados que checam desde transições pontuais de estado até cenários integrados de falha e recuperação de nós em memória,
+    \item uma avaliação experimental detalhada variando o limiar de detecção e a quantidade de nós, medindo tempo de reconvergência, volume de mensagens e tempo de recuperação com percentis e intervalos de confiança,
+    \item um terceiro algoritmo integrado como atividade bônus, o protocolo de compromisso atômico Two-Phase Commit (2PC), coordenado pelo líder eleito para demonstrar transações distribuídas e o impacto real do bloqueio em caso de falhas.
 \end{enumerate}
 
 \section{Modelo do Sistema}
+Antes de projetar qualquer algoritmo distribuído, é fundamental definir sob quais regras e limitações do mundo real o sistema opera. A seguir, explicamos as premissas adotadas em nossa solução.
+
 \subsection{Modelo temporal}
-Assume-se um sistema \emph{parcialmente síncrono}: após um instante de
-estabilização, existe um limite superior conhecido para a latência de
-comunicação e para o tempo de processamento local. Essa hipótese justifica o
-uso de um limiar $T_{hb}$ (\texttt{HEARTBEAT\_TIMEOUT}) para declarar o líder
-falho: sem a suposição de sincronia parcial, não seria possível distinguir um
-líder lento de um líder que falhou.
+Trabalhamos com a premissa de um sistema \emph{parcialmente síncrono}. Em sistemas puramente assíncronos, onde mensagens podem atrasar indefinidamente sem limite conhecido, é impossível distinguir com certeza se um nó travou ou se ele está apenas respondendo devagar. Por isso, assumimos que, após um intervalo razoável de estabilização da rede, existe um tempo máximo conhecido para entrega de mensagens e processamento local. Essa hipótese justifica o uso seguro de um temporizador limite $T_{hb}$ (\texttt{HEARTBEAT\_TIMEOUT}) para considerar que o líder falhou quando ele deixa de enviar batimentos.
 
 \subsection{Propriedades dos canais}
-A comunicação ocorre por conexões TCP ponto a ponto entre os nós
-(\texttt{asyncio.start\_server}/\texttt{open\_connection}). Cada mensagem é um
-documento JSON delimitado por uma conexão de vida curta. As garantias são:
-\emph{entrega confiável} (TCP retransmite até obter confirmação),
-\emph{ordenação FIFO por par de nós} e \emph{ausência de duplicação} no nível da
-aplicação. Não há ordenação global entre canais distintos, o que não é
-necessário para os algoritmos escolhidos.
+Cada nó se comunica com os demais por conexões TCP ponto a ponto gerenciadas via \texttt{asyncio.start\_server} e \texttt{open\_connection}. Cada mensagem é transmitida como um objeto JSON estruturado em uma conexão dedicada. O uso do protocolo TCP nos oferece garantias essenciais para simplificar o projeto: entrega confiável (com retransmissão automática em caso de perdas locais), entrega ordenada no padrão FIFO entre cada par de nós e ausência de duplicação no nível da aplicação. Não exigimos uma ordem de entrega global entre canais distintos, pois a lógica de eleição e batimentos não necessita dessa restrição.
 
 \subsection{Tipos de falha}
-Consideram-se falhas do tipo \emph{crash-stop} (o nó para de responder e não
-recupera) e \emph{crash-recovery} (o nó reinicia e volta a participar). Não se
-modelam partições de rede nem falhas bizantinas. A falha é injetada no nível da
-aplicação com \texttt{docker kill} (SIGKILL imediato).
+Nosso foco abrange falhas do tipo parada definitiva (\emph{crash-stop}), em que o nó simplesmente encerra sua atividade e não recupera, e falhas seguidas de reinicialização (\emph{crash-recovery}), onde o nó reinicia do zero e volta a participar do grupo. Não modelamos divisões de rede em ilhas isoladas (partições) nem comportamentos maliciosos ou corrompidos (falhas bizantinas). Nos experimentos práticos, injetamos a falha diretamente no processo usando o comando \texttt{docker kill} com sinal SIGKILL imediato.
 
 \subsection{Relógios, persistência e reinicialização}
-Não há sincronização de relógios físicos; cada nó usa apenas seu relógio local
-para medir \emph{intervalos} (heartbeat e timeout), o que é suficiente. Os nós
-não mantêm estado persistente entre execuções: ao reiniciar, um nó reconstrói
-sua visão do cluster a partir da lista estática de pares e dispara a eleição de
-inicialização/recuperação.
+Não há sincronização de relógios físicos entre os nós. Cada participante consulta apenas o relógio de sua própria máquina para cronometrar a passagem do tempo entre batimentos e tempos limites locais, o que elimina problemas de desvio temporal. Além disso, os nós não mantêm estado persistente entre execuções: ao reiniciar, o nó reconstrói seu conhecimento lendo a lista estática de endereços dos pares e participa de uma fase inicial de recuperação para descobrir ou reivindicar a liderança.
 
 \subsection{Segurança e vivacidade}
+Para termos certeza de que os algoritmos funcionam de maneira correta, definimos duas garantias fundamentais:
 \begin{itemize}
-    \item \textbf{Segurança:} em qualquer instante estável, existe no máximo um
-    nó que se considera coordenador e é aceito como tal pelos demais.
-    \item \textbf{Vivacidade:} se o líder falha, um nó vivo de maior ID acaba
-    sendo declarado o novo coordenador; e, se um nó com ID maior que o líder
-    atual se recupera, ele reassume a coordenação.
+    \item \textbf{Segurança:} em qualquer instante estável, existe no máximo um único nó que se considera coordenador e é reconhecido como tal pelos demais participantes.
+    \item \textbf{Vivacidade:} se o líder falha, o nó ativo de maior identificador acaba sendo declarado o novo coordenador. Da mesma forma, se um nó com identificador superior ao líder atual se recupera de uma falha, ele reassume o comando do grupo.
 \end{itemize}
 
 \section{Arquitetura e Implementação}
-A solução é composta por três camadas: (i) a \emph{rede}, que serializa e
-transporta mensagens; (ii) os \emph{algoritmos}, que implementam as regras de
-eleição e de detecção; e (iii) o \emph{roteador} de mensagens, que despacha cada
-mensagem recebida ao componente correto. A Fig.~\ref{fig:arq} ilustra a
-arquitetura.
+Para manter o código modular e fácil de entender, estruturamos a aplicação em três camadas principais: a camada de \emph{rede}, que cuida da conexão e transporte das mensagens, a camada dos \emph{algoritmos}, onde residem as regras de eleição e detecção, e o \emph{roteador}, que recebe os pacotes e entrega cada um ao componente responsável. A Fig.~\ref{fig:arq} resume essa organização.
 
 \begin{figure}[!t]
 \centering
 \includegraphics[width=0.95\columnwidth]{figures/fig6_arquitetura.png}
-\caption{Arquitetura da solução: nós independentes em uma rede bridge do Docker
-Compose, comunicando-se por TCP/JSON; o líder envia heartbeats e, em caso de
-falha, os nós trocam mensagens de eleição.}
+\caption{Visão geral da arquitetura: contêineres independentes interligados pela rede bridge do Docker Compose, comunicando-se via TCP/JSON. O líder distribui batimentos periódicos e os nós disparam a eleição quando detectam silêncio prolongado.}
 \label{fig:arq}
 \end{figure}
 
 \subsection{Camada de rede}
-A classe \texttt{NetworkManager} (\texttt{network.py}) expõe
-\texttt{send\_message} e um servidor assíncrono. Ela também mantém contadores de
-mensagens enviadas e recebidas, usados na instrumentação. Cada mensagem carrega
-um campo \texttt{type} (por exemplo, \texttt{HEARTBEAT}, \texttt{ELECTION},
-\texttt{ANSWER}, \texttt{COORDINATOR}) e o \texttt{sender\_id}.
+A responsabilidade de comunicação fica a cargo da classe \texttt{NetworkManager} (no arquivo \texttt{network.py}). Ela inicia um servidor TCP assíncrono e fornece o método \texttt{send\_message} para despachar dados aos pares. Além de empacotar o conteúdo em JSON, a camada mantém contadores de mensagens enviadas e recebidas, usados na instrumentação. Toda mensagem transmitida carrega o remetente (\texttt{sender\_id}) e uma etiqueta indicando seu objetivo, como \texttt{HEARTBEAT}, \texttt{ELECTION}, \texttt{ANSWER} ou \texttt{COORDINATOR}.
 
 \subsection{Algoritmo do Valentão (Bully)}
-Cada nó conhece os IDs dos demais e o maior ID entre eles. A eleição
-(\texttt{alg1\_bully.py}) segue as regras clássicas:
+O princípio deste algoritmo, implementado em \texttt{alg1\_bully.py}, é baseado em uma regra simples de hierarquia: o nó de maior identificador que estiver ativo sempre manda no cluster. Cada nó conhece os identificadores dos demais e o maior valor entre eles. Quando uma eleição acontece, o protocolo segue quatro passos:
 \begin{enumerate}
-    \item um nó inicia a eleição enviando \texttt{ELECTION} a todos os pares de
-    ID maior;
-    \item um nó que recebe \texttt{ELECTION} de um ID menor responde
-    \texttt{ANSWER} e, se ainda não estiver em eleição, inicia a sua;
-    \item se, após $T_{ele}$ (\texttt{ELECTION\_TIMEOUT}), o iniciador não
-    recebeu \texttt{ANSWER}, ele se autoproclama coordenador e envia
-    \texttt{COORDINATOR} a todos;
-    \item ao receber \texttt{COORDINATOR}, um nó adota o novo líder e atualiza o
-    detector de falhas.
+    \item um nó inicia a eleição enviando \texttt{ELECTION} a todos os pares de identificador maior,
+    \item um nó que recebe \texttt{ELECTION} de um identificador menor responde \texttt{ANSWER} e, se ainda não estiver em eleição, inicia a sua própria eleição,
+    \item se, após $T_{ele}$ (\texttt{ELECTION\_TIMEOUT}), o iniciador não recebeu nenhuma resposta \texttt{ANSWER}, ele se autoproclama coordenador e envia \texttt{COORDINATOR} a todos,
+    \item ao receber \texttt{COORDINATOR}, um nó reconhece formalmente o novo líder e atualiza seu detector de falhas.
 \end{enumerate}
-O nó de maior ID vivo sempre vence, pois nenhum ID maior responde. Uma guarda
-adicional impede que uma eleição obsoleta se autoproclame caso um
-\texttt{COORDINATOR} chegue durante a espera (\texttt{is\_electing} torna-se
-falso e o anúncio é abortado).
+O nó de maior identificador vivo sempre vence, pois nenhum nó superior responde. Uma guarda adicional impede que uma eleição obsoleta se autoproclame caso um anúncio \texttt{COORDINATOR} chegue durante a espera: a variável \texttt{is\_electing} torna-se falsa e o anúncio é cancelado.
 
 \subsection{Detector de falhas por heartbeat}
-A classe \texttt{HeartbeatDetector} (\texttt{alg2\_heartbeat.py}) tem duas
-tarefas concorrentes:
+A detecção de quedas é gerenciada pela classe \texttt{HeartbeatDetector} (\texttt{alg2\_heartbeat.py}). Ela organiza duas tarefas concorrentes:
 \begin{itemize}
-    \item \emph{emissor} (\texttt{run\_sender}): se o nó é líder, envia
-    \texttt{HEARTBEAT} a todos os pares a cada $I$ (\texttt{HEARTBEAT\_INTERVAL});
-    \item \emph{verificador} (\texttt{run\_checker}): se o nó não é líder e não
-    está em eleição, verifica se o tempo desde o último heartbeat do líder
-    excedeu $T_{hb}$; em caso positivo, dispara a eleição.
+    \item \emph{emissor} (\texttt{run\_sender}): se o nó é líder, envia \texttt{HEARTBEAT} periodicamente a todos os pares a cada intervalo $I$ (\texttt{HEARTBEAT\_INTERVAL}),
+    \item \emph{verificador} (\texttt{run\_checker}): se o nó não é líder e não está em eleição, verifica se o tempo desde o último batimento recebido do líder excedeu $T_{hb}$. Em caso positivo, dispara a eleição.
 \end{itemize}
-Somente heartbeats do líder atual são considerados (verifica-se
-\texttt{sender\_id == leader\_id}), o que evita que mensagens de nós
-desatualizados renovem o temporizador indevidamente.
+Somente batimentos do líder atual são considerados (verifica-se \texttt{sender\_id == leader\_id}), o que evita que mensagens de nós desatualizados renovem o temporizador indevidamente.
 
 \subsection{Tratamento de falhas e recuperação}
-A integração dos dois algoritmos é feita no laço principal
-(\texttt{main.py}). Ao iniciar, cada nó executa uma \emph{eleição de
-bootstrap} após um atraso $T_{boot}$ (\texttt{BOOTSTRAP\_DELAY}): se o nó
-acredita ser o de maior ID, ele se proclama coordenador imediatamente; caso
-contrário, aguarda heartbeats do líder. Esse mecanismo implementa
-\emph{crash-recovery}: um nó que reinicia com o maior ID volta a anunciar sua
-coordenação e os demais o adotam. Se o líder não reaparece, o detector de
-falhas dos seguidores dispara uma nova eleição.
+A integração dos dois algoritmos é feita no laço principal (\texttt{main.py}). Ao iniciar, cada nó executa uma eleição de inicialização após um atraso $T_{boot}$ (\texttt{BOOTSTRAP\_DELAY}): se o nó acredita ser o de maior identificador, ele se proclama coordenador imediatamente. Caso contrário, aguarda batimentos do líder. Esse mecanismo implementa \emph{crash-recovery}: um nó que reinicia com o maior identificador volta a anunciar sua liderança e os demais o adotam. Se o líder não reaparece, o detector de falhas dos seguidores dispara uma nova eleição.
 
 \section{Propriedades de Correção e Testes}
-As propriedades de correção são verificadas em dois níveis. Os testes unitários
-(\texttt{test\_alg1.py}, \texttt{test\_alg2.py}) checam transições isoladas:
-o maior ID se autoproclama; um ID menor responde \texttt{ANSWER}; receber
-\texttt{COORDINATOR} atualiza o líder; o timeout de heartbeat dispara o
-callback de eleição. Os testes de integração (\texttt{test\_integration.py})
-usam um barramento em memória que substitui o TCP e validam as propriedades
-globais:
+Para validar se a implementação é confiável antes de colocá-la sob cargas e falhas reais, criamos testes automatizados em dois níveis complementares. Os testes unitários (\texttt{test\_alg1.py}, \texttt{test\_alg2.py}) checam transições isoladas: o maior identificador se autoproclama, um identificador menor responde \texttt{ANSWER}, receber \texttt{COORDINATOR} atualiza o líder e o timeout de batimento dispara o callback de eleição. Os testes de integração (\texttt{test\_integration.py}) usam um barramento em memória que substitui o TCP e validam as propriedades globais:
 \begin{itemize}
-    \item \textbf{segurança} --- após a eleição existe exatamente um líder, o
-    de maior ID;
-    \item \textbf{vivacidade} --- com o maior ID falho, o segundo maior assume;
-    \item \textbf{crash-recovery} --- ao reiniciar, o maior ID reassume a
-    liderança;
-    \item \textbf{custo} --- o número de mensagens de uma eleição é limitado
-    por $O(N^2)$.
+    \item \textbf{segurança:} após a eleição existe exatamente um líder, que é o nó de maior identificador ativo,
+    \item \textbf{vivacidade:} com o maior identificador falho, o segundo maior assume o comando,
+    \item \textbf{recuperação:} ao reiniciar, o maior identificador reassume a liderança com sucesso,
+    \item \textbf{custo:} o número total de mensagens de uma eleição é limitado por $O(N^2)$.
 \end{itemize}
-A suíte completa (20 testes) executa com \texttt{pytest tests/ -v}. Os testes
-do bônus (\texttt{test\_alg3.py}) cobrem as travas do armazenamento, os votos
-(\texttt{YES}/\texttt{NO} por conflito), a atomicidade sob conflito e sob voto
-negativo, e o protocolo de terminação cooperativo (aborto, \emph{commit} quando
-alguém já efetivou e bloqueio com nó inacessível).
+A suíte completa possui 20 testes e pode ser executada com o comando \texttt{pytest tests/ -v}. Os testes do bônus (\texttt{test\_alg3.py}) cobrem as travas do armazenamento, os votos afirmativos ou negativos por conflito, a atomicidade sob conflito ou sob voto negativo, e o protocolo de terminação cooperativo com nós inacessíveis.
 
 \section{Algoritmo Bônus: Compromisso Atômico (2PC)}
-Como atividade de bônus, implementou-se um terceiro algoritmo de
-\emph{compromisso atômico}: o \emph{Two-Phase Commit} (2PC), coordenado pelo
-líder eleito pelo Bully. Isso integra os três temas em um único sistema: a
-detecção de falhas dispara a eleição, que por sua vez fornece o coordenador do
-protocolo de compromisso.
+Como atividade extra de aprofundamento, integramos um terceiro algoritmo distribuído à nossa solução: o protocolo de compromisso atômico Two-Phase Commit (2PC), coordenado pelo líder eleito pelo Bully. Isso integra os três temas em um caso de uso prático: a detecção de falhas dispara a eleição, que por sua vez elege o coordenador do protocolo de compromisso.
 
 \subsection{Protocolo}
-Cada nó mantém um armazenamento chave-valor com travas por transação. Uma
-transação é um conjunto de operações sobre chaves. O protocolo tem duas fases:
+Cada nó mantém um armazenamento chave-valor em memória com travas por transação. Uma transação é um conjunto de operações sobre chaves. O protocolo tem duas fases bem definidas:
 \begin{enumerate}
-    \item \textbf{Votação (PREPARE):} o coordenador envia \texttt{PREPARE} a
-    todos os participantes; cada um tenta travar as chaves e responde
-    \texttt{VOTE} (\texttt{YES}/\texttt{NO});
-    \item \textbf{Decisão:} se todos votaram \texttt{YES} (e o próprio
-    coordenador conseguiu travar), decide \texttt{COMMIT}; caso contrário,
-    \texttt{ABORT}. A decisão é propagada e cada nó aplica ou descarta as
-    operações, liberando as travas.
+    \item \textbf{Votação (PREPARE):} o coordenador envia \texttt{PREPARE} a todos os participantes. Cada um tenta travar as chaves e responde \texttt{VOTE} com voto afirmativo (\texttt{YES}) ou negativo (\texttt{NO}),
+    \item \textbf{Decisão:} se todos votaram \texttt{YES} (e o próprio coordenador conseguiu travar), decide \texttt{COMMIT}. Caso contrário, decide \texttt{ABORT}. A decisão é propagada e cada nó aplica ou descarta as operações, liberando as travas.
 \end{enumerate}
-A coleta de votos usa um \texttt{asyncio.Event} (acordado ao receber o último
-voto) com \emph{timeout} $T_{voto}$; a ausência de um voto (por exemplo, um
-participante falho) leva a \texttt{ABORT}.
+A coleta de votos usa um \texttt{asyncio.Event} acordado ao receber o último voto, com tempo limite $T_{voto}$. A ausência de um voto (por exemplo, devido a um participante falho) leva ao aborto da transação.
 
 \subsection{Propriedades e a limitação de bloqueio}
-O 2PC garante \textbf{atomicidade} (todos aplicam ou todos descartam) e
-\textbf{uniformidade} (não há decisões divergentes). Sua limitação clássica é o
-\textbf{bloqueio}: se o coordenador falha após o \texttt{PREPARE} e antes da
-decisão, os participantes ficam \emph{preparados} segurando travas sem poder
-decidir sozinhos. Para mitigar, implementou-se um \textbf{protocolo de
-terminação cooperativo}: após $T_{dec}$, um participante preparado consulta os
-demais (\texttt{QUERY}/\texttt{STATE}); se algum já efetivou (\texttt{COMMIT}),
-adota essa decisão; se todos respondem e nenhum efetivou, aborta com segurança;
-se algum nó está inacessível, permanece bloqueado. Assim, o \emph{crash-recovery}
-do coordenador (que o Bully reconecta ao cluster) permite concluir a terminação
---- mas o 2PC continua não sendo não-bloqueante.
+O 2PC garante \textbf{atomicidade} (todos aplicam ou todos descartam) e \textbf{uniformidade} (não há decisões divergentes). Sua limitação clássica é o \textbf{bloqueio}: se o coordenador falha após o envio de \texttt{PREPARE} e antes da decisão, os participantes ficam no estado preparado segurando travas sem poder decidir sozinhos. Para mitigar esse problema, implementamos um \textbf{protocolo de terminação cooperativo}: após um tempo $T_{dec}$, um participante preparado consulta os demais via \texttt{QUERY}/\texttt{STATE}. Se algum já efetivou a transação (\texttt{COMMIT}), adota essa decisão. Se todos respondem e nenhum efetivou, aborta com segurança. Se algum nó está inacessível, permanece bloqueado para evitar divergências. Assim, a recuperação do coordenador pelo mecanismo do Bully permite concluir a terminação, embora o 2PC continue sendo um protocolo bloqueante por natureza.
 
 \section{Metodologia Experimental}
 \subsection{Métricas}
-Para cada algoritmo e cenário definiram-se métricas de desempenho relevantes:
+Para cada algoritmo e cenário definiram-se métricas objetivas de desempenho:
 \begin{itemize}
-    \item \textbf{tempo de reconvergência}: intervalo entre a falha do líder
-    (\texttt{docker kill}) e o anúncio do novo líder;
-    \item \textbf{decomposição}: tempo de \emph{detecção} (timeout) e tempo de
-    \emph{eleição} (resposta + anúncio), obtidos por subtração dos instantes;
-    \item \textbf{custo de mensagens}: número de mensagens de eleição trocadas
-    durante a reconvergência;
-    \item \textbf{tempo de recuperação}: intervalo entre o reinício do nó
-    derrubado e o seu anúncio como líder novamente.
+    \item \textbf{tempo de reconvergência:} intervalo entre a falha do líder via \texttt{docker kill} e o anúncio do novo líder para o grupo,
+    \item \textbf{decomposição:} tempo de \emph{detecção} (timeout de batimento) e tempo de \emph{eleição} (troca de mensagens e anúncio), obtidos por subtração dos instantes,
+    \item \textbf{custo de mensagens:} número de mensagens de eleição trocadas durante a reconvergência,
+    \item \textbf{tempo de recuperação:} intervalo entre o reinício do nó derrubado e o seu anúncio como líder novamente.
 \end{itemize}
 
 \subsection{Instrumentação e medição}
-Todos os eventos relevantes são registrados nos logs com \emph{timestamp}
-\emph{epoch}, o que permite reconstruir os tempos sem depender da granularidade
-de sondagem. O instante da falha é registrado pelo próprio script em torno da
-chamada de \texttt{docker kill}. O tempo de detecção é o intervalo entre essa
-falha e o primeiro timeout registrado. Como o detector conta o timeout a partir
-do último heartbeat recebido, esse intervalo depende da fase em que a falha
-ocorre no ciclo de envio e pode ser menor que $T_{hb}$. Uma observação importante:
-os contêineres executam o Python como PID~1, que ignora \texttt{SIGTERM} por
-padrão; portanto usamos \texttt{docker kill} (SIGKILL imediato) em vez de
-\texttt{docker stop}, que aguardaria o \emph{grace period} de \qty{10}{\second}
-antes do SIGKILL e inflaria o tempo medido.
+Todos os eventos relevantes são registrados nos logs com carimbos em milissegundos (\emph{epoch}), o que permite reconstruir os tempos sem depender da granularidade de sondagens externas. O instante da falha é registrado pelo próprio script em torno da chamada de \texttt{docker kill}. O tempo de detecção é o intervalo entre essa falha e o primeiro timeout registrado. Como o detector conta o timeout a partir do último batimento recebido, esse intervalo depende da fase em que a falha ocorre no ciclo de envio e pode ser menor que $T_{hb}$. 
+
+Uma observação prática importante sobre o ambiente: os contêineres executam o Python como PID~1, que ignora o sinal padrão \texttt{SIGTERM}. Portanto, usamos \texttt{docker kill} (sinal SIGKILL imediato) em vez de \texttt{docker stop}, que aguardaria um período de tolerância de 10\,s antes do SIGKILL e inflaria artificialmente o tempo medido.
 
 \subsection{Parâmetros, réplicas e ambiente}
 Variou-se um parâmetro por vez em pelo menos três níveis:
 \begin{itemize}
-    \item \textbf{Experimento A:} limiar de heartbeat
-    $T_{hb} \in \{1,2,3,5\}$\,s com $N=3$;
-    \item \textbf{Experimento B:} número de nós $N \in \{3,4,5\}$ com
-    $T_{hb}=3$\,s;
-    \item \textbf{Experimento C (bônus, 2PC):} $N \in \{3,4,5\}$ transações
-    concorrentes (vazão/latência) e cenários de falha de participante e de
-    coordenador.
+    \item \textbf{Experimento A:} limiar de heartbeat $T_{hb} \in \{1, 2, 3, 5\}$\,s com cluster de 3 nós,
+    \item \textbf{Experimento B:} quantidade de nós $N \in \{3, 4, 5\}$ com limiar fixo $T_{hb}=3$\,s,
+    \item \textbf{Experimento C (bônus, 2PC):} variação com $N \in \{3, 4, 5\}$ em transações concorrentes para medir vazão e latência, além de cenários com injeção de falhas em participante e no coordenador.
 \end{itemize}
-Cada configuração de falha/recuperação foi repetida seis vezes, reiniciando o
-nó que falhou entre os ciclos; as cinco repetições de vazão do 2PC usam
-transações distintas no mesmo cluster por configuração. Os cinco ensaios de
-falha do coordenador do 2PC recriam o cluster. Portanto, as repetições não
-representam máquinas independentes. Para falha/recuperação, reportam-se média,
-desvio, p50, p95 e intervalo de confiança de 95\% via $t$-Student; como os
-ciclos reutilizam o cluster, esses intervalos são indicativos. Para o 2PC,
-a tabela apresenta a mediana das cinco repetições e os percentis de latência
-medidos por transação. Os ensaios foram executados em uma máquina Pop!\_OS 22.04
-com processador Intel Core i5-12500H, 16\,GB de RAM, Docker Engine 29.1.5,
-Docker Compose 5.0.1 e Python 3.10.12 no host; os nós usam a imagem
-\texttt{python:3.11-slim}. Aguardaram-se 2,5\,s após a estabilização antes das
-baterias de falha e 2PC (3\,s no cenário normal). Os experimentos são
-automatizados por \texttt{experiments/run\_experiments.py} e
-\texttt{experiments/run\_2pc.py}, e analisados por \texttt{experiments/analyze.py}.
+Cada configuração de falha e recuperação foi repetida seis vezes, reiniciando o nó afetado entre os ciclos. As cinco repetições de vazão do 2PC usam transações distintas no mesmo cluster por configuração, enquanto os cinco ensaios de falha do coordenador recriam o cluster. Portanto, as repetições não representam máquinas físicas independentes. Para falha e recuperação, reportam-se média, desvio padrão, mediana (p50), percentil 95 (p95) e intervalo de confiança de 95\% via distribuição $t$-Student como referências indicativas. Para o 2PC, a tabela apresenta a mediana das cinco repetições e os percentis de latência por transação. 
+
+Os ensaios foram executados em uma máquina Pop!\_OS 22.04 LTS com processador Intel Core i5-12500H (16 vCPUs), 16\,GB de RAM, Docker Engine 29.1.5, Docker Compose 5.0.1 e Python 3.10.12 no host, utilizando a imagem oficial \texttt{python:3.11-slim} nos contêineres. Aguardou-se um aquecimento de 2,5\,s após a estabilização antes das baterias de falha e 2PC (3\,s no cenário normal). Os experimentos são automatizados por \texttt{experiments/run\_experiments.py} e \texttt{experiments/run\_2pc.py}, e analisados por \texttt{experiments/analyze.py}.
 
 \section{Resultados e Discussão}
 \subsection{Cenário normal (segurança)}
-No cenário normal (\texttt{run\_safety.py}), o cluster de três nós estabiliza
-com o nó~3 como líder; após \qty{20}{\second} de observação, nenhuma eleição
-espúria é disparada e todos os nós concordam sobre a identidade do líder. Isso
-confirma a \emph{segurança} (um único coordenador) e a ausência de oscilação em
-regime estável.
+No cenário normal (\texttt{run\_safety.py}), o cluster padrão de três nós estabiliza com o nó~3 como líder. Ao longo de 20\,s de observação contínua, nenhuma eleição espúria é disparada e todos os nós mantêm total acordo sobre a liderança. Esse resultado confirma a propriedade de \emph{segurança} (exatamente um coordenador) e a ausência de oscilação em regime estável.
 
-\subsection{Reconvergência \emph{vs.} limiar de heartbeat}
-A Tabela~\ref{tab:timeout} e a Fig.~\ref{fig:timeout} mostram os resultados do
-Experimento~A. O tempo de reconvergência cresce com $T_{hb}$. A detecção média variou de
-0,59\,s a 4,52\,s, enquanto a fase de eleição permaneceu em torno de 2,00\,s.
-Isso é esperado: após a queda, o detector aguarda o tempo restante desde o
-último heartbeat, e não um timeout completo iniciado no instante da falha.
-Assim, a soma do tempo de detecção observado com a espera de eleição explica
-as médias de reconvergência (de 2,60\,s a 6,52\,s). As barras de erro mostram
-intervalos de confiança de 95\%; com seis repetições, os p95 devem ser lidos
-como estimativas indicativas, não como garantias de cauda.
+\subsection{Reconvergência em função do limiar de heartbeat}
+A Tabela~\ref{tab:timeout} e a Fig.~\ref{fig:timeout} mostram os resultados do Experimento~A. O tempo de reconvergência cresce de forma contínua com $T_{hb}$. A detecção média variou de 0,59\,s a 4,52\,s, enquanto a fase de eleição permaneceu praticamente constante em torno de 2,00\,s. Isso é plenamente esperado: após a queda, o detector aguarda o tempo restante desde o último batimento recebido, e não um timeout completo iniciado no instante da falha. Assim, a soma da detecção observada com a espera de eleição explica as médias de reconvergência (de 2,60\,s a 6,52\,s). As barras de erro mostram intervalos de confiança de 95\%, indicando estabilidade entre as repetições.
 
 \begin{table}[!t]
 \centering
-\caption{Reconvergência \emph{vs.} limiar de heartbeat ($N=3$, $n=6$).}
+\caption{Reconvergência em função do limiar de heartbeat ($N=3$, $n=6$).}
 \label{tab:timeout}
 \input{tabelas/tab_timeout.tex}
 \end{table}
@@ -336,22 +165,18 @@ como estimativas indicativas, não como garantias de cauda.
 \begin{figure}[!t]
 \centering
 \includegraphics[width=0.95\columnwidth]{figures/fig1_convergencia_timeout.png}
-\caption{Decomposição do tempo de reconvergência: detecção (timeout) + eleição,
-comparada ao modelo $T_{hb}+T_{ele}$.}
+\caption{Decomposição do tempo de reconvergência em detecção e eleição, comparada ao modelo teórico de referência $T_{hb}+T_{ele}$.}
 \label{fig:timeout}
 \end{figure}
 
-\subsection{Reconvergência e custo \emph{vs.} número de nós}
-A Tabela~\ref{tab:nos} e as Figs.~\ref{fig:nos}--\ref{fig:msgs} apresentam o
-Experimento~B. O tempo médio de reconvergência variou pouco (de 4,31\,s a 4,55\,s) em
-$N$, enquanto o número de mensagens cresceu de 6 para 20. Os valores medidos
-seguem $N(N-1)$ nesses tamanhos, coerentes com a complexidade
-$O(N^2)$ do Algoritmo do Valentão: cada nó envia \texttt{ELECTION} a todos os
-pares de ID maior; no pior caso, a eleição pode gerar $O(N^2)$ mensagens.
+\subsection{Reconvergência e custo em função do número de nós}
+A Tabela~\ref{tab:nos} e as Figs.~\ref{fig:nos} e~\ref{fig:msgs} apresentam o Experimento~B. O tempo médio de reconvergência variou muito pouco em função de $N$ (ficando entre 4,31\,s e 4,55\,s), pois a latência de rede local entre contêineres é desprezível e a espera é governada pelos tempos de timeout. 
+
+Em contrapartida, o número de mensagens cresceu de 6 para 20. Os valores medidos seguem exatamente a relação $N(N-1)$ nesses tamanhos, confirmando a complexidade $O(N^2)$ típica do Algoritmo do Valentão: nós de identificador menor enviam \texttt{ELECTION} a todos os pares superiores, que por sua vez disparam novas mensagens.
 
 \begin{table}[!t]
 \centering
-\caption{Reconvergência e mensagens \emph{vs.} número de nós ($T_{hb}=3$\,s, $n=6$).}
+\caption{Reconvergência e mensagens em função de $N$ ($T_{hb}=3$\,s, $n=6$).}
 \label{tab:nos}
 \input{tabelas/tab_nos.tex}
 \end{table}
@@ -366,22 +191,16 @@ pares de ID maior; no pior caso, a eleição pode gerar $O(N^2)$ mensagens.
 \begin{figure}[!t]
 \centering
 \includegraphics[width=0.95\columnwidth]{figures/fig3_mensagens_complexidade.png}
-\caption{Complexidade de mensagens medida e referência $O(N^2)$.}
+\caption{Complexidade de mensagens medida e curva teórica de referência $O(N^2)$.}
 \label{fig:msgs}
 \end{figure}
 
-\subsection{Crash-recovery}
-A Tabela~\ref{tab:rec} e a Fig.~\ref{fig:rec} mostram o tempo entre reiniciar o
-nó de maior ID e seu anúncio como líder: a média ficou entre 0,75\,s e
-0,77\,s. Esse valor é menor que o atraso de bootstrap configurado em 2\,s
-porque, ao receber um heartbeat do líder provisório de ID inferior, o nó
-reiniciado já se considera o maior ID e reanuncia sua liderança. Portanto, a
-métrica captura essa reação, não o término do atraso de bootstrap. A recuperação
-foi semelhante para $N=3,4,5$ neste cenário.
+\subsection{Recuperação do nó líder (Crash-recovery)}
+A Tabela~\ref{tab:rec} e a Fig.~\ref{fig:rec} mostram o tempo decorrido entre reiniciar o nó de maior identificador e seu novo anúncio como líder: a média ficou entre 0,75\,s e 0,77\,s. Esse valor é substancialmente menor que o atraso de inicialização padrão de 2\,s porque, ao receber o primeiro batimento emitido pelo líder provisório (que possui identificador menor), o nó reiniciado identifica a discrepância e reanuncia imediatamente a liderança. Portanto, a métrica captura essa reação rápida, e a recuperação comportou-se de forma semelhante para $N=3, 4, 5$.
 
 \begin{table}[!t]
 \centering
-\caption{Tempo de recuperação \emph{vs.} número de nós ($n=6$).}
+\caption{Tempo de recuperação em função do número de nós ($n=6$).}
 \label{tab:rec}
 \input{tabelas/tab_recuperacao.tex}
 \end{table}
@@ -393,43 +212,24 @@ foi semelhante para $N=3,4,5$ neste cenário.
 \label{fig:rec}
 \end{figure}
 
-A Fig.~\ref{fig:timeline} resume o ciclo completo (falha e recuperação) em uma
-linha do tempo: os heartbeats periódicos do líder, o instante da falha, a
-detecção pelo timeout, a assunção do novo líder e a recuperação do nó
-original.
+A Fig.~\ref{fig:timeline} ilustra o ciclo operacional completo em uma linha do tempo intuitiva: os batimentos periódicos em regime estável, o momento da falha, a detecção por timeout, a posse do substituto e a recuperação do líder original.
 
 \begin{figure}[!t]
 \centering
 \includegraphics[width=0.95\columnwidth]{figures/fig5_timeline.png}
-\caption{Linha do tempo de um ciclo típico de falha \emph{crash-stop} seguida de
-\emph{crash-recovery}.}
+\caption{Linha do tempo didática de um ciclo completo de falha e recuperação.}
 \label{fig:timeline}
 \end{figure}
 
 \subsection{Análise à luz da complexidade}
-Os resultados são coerentes com o modelo implementado. A detecção ocorre entre
-zero e aproximadamente $T_{hb}$ após a falha, pois o relógio do detector já
-estava contando desde o último heartbeat; a eleição adiciona uma espera de
-cerca de 2\,s. A contagem de mensagens cresce quadraticamente nos tamanhos
-testados, como esperado para o Bully. Como os ensaios usam até cinco nós e seis
-repetições, eles ilustram essa tendência, mas não permitem extrapolações
-precisas. Reduzir $T_{hb}$ diminui a demora máxima para detectar a falha, mas
-aumenta a sensibilidade a atrasos e falsos positivos.
+Os resultados práticos são coerentes com o modelo teórico. A detecção ocorre entre zero e aproximadamente $T_{hb}$ após a falha, pois o relógio do detector já estava em contagem regressiva desde o último batimento recebido. A eleição acrescenta a espera de cerca de 2\,s. A contagem de mensagens cresce quadraticamente nos tamanhos testados, como previsto para o Bully. Reduzir $T_{hb}$ acelera a detecção da falha, mas amplia a sensibilidade a atrasos momentâneos de rede e ao risco de alarmes falsos.
 
-\subsection{Resultados do 2PC (bônus)}
-A Tabela~\ref{tab:2pc-tp} e a Fig.~\ref{fig:2pc-tp} mostram a vazão e a
-latência do 2PC em função de $N$. Nas 300 transações de cada configuração,
-100\% efetivaram. A mediana do p50 aumentou de 122\,ms ($N=3$) para 227\,ms
-($N=5$), compatível com o maior número de participantes consultados. A vazão
-mediana foi de 223,0 txn/s para $N=3$, 223,5 txn/s para $N=4$ e 123,1 txn/s
-para $N=5$. Neste último caso houve variação entre 118 e 227 txn/s nas cinco
-repetições; por isso, o resultado sugere uma queda nesse ambiente, mas não
-permite atribuí-la apenas ao custo do protocolo. O p95 de latência foi calculado
-por transação e resumido pela mediana entre repetições.
+\subsection{Resultados práticos do 2PC (bônus)}
+A Tabela~\ref{tab:2pc-tp} e a Fig.~\ref{fig:2pc-tp} apresentam a vazão e a latência do 2PC em função de $N$. Em todas as 300 transações de cada configuração em regime normal, 100\% foram efetivadas com sucesso. A mediana do p50 subiu de 122\,ms ($N=3$) para 227\,ms ($N=5$), compatível com o maior número de participantes consultados na votação. A vazão mediana foi de 223,0 txn/s para $N=3$, 223,5 txn/s para $N=4$ e 123,1 txn/s para $N=5$. Neste último tamanho observou-se dispersão entre 118 e 227 txn/s entre repetições, refletindo a concorrência de agendamento entre múltiplos contêineres na mesma máquina física compartilhada.
 
 \begin{table}[!t]
 \centering
-\caption{2PC: vazão e latência vs. número de nós ($n=5$).}
+\caption{2PC: vazão e latência em função do número de nós ($n=5$).}
 \label{tab:2pc-tp}
 \input{tabelas/tab_2pc_throughput.tex}
 \end{table}
@@ -437,22 +237,15 @@ por transação e resumido pela mediana entre repetições.
 \begin{figure}[!t]
 \centering
 \includegraphics[width=0.95\columnwidth]{figures/fig7_2pc_throughput.png}
-\caption{2PC: vazão e latência (p50/p95) em função de $N$.}
+\caption{2PC: vazão e percentis de latência (p50 e p95) em função de $N$.}
 \label{fig:2pc-tp}
 \end{figure}
 
-A Tabela~\ref{tab:2pc-faults} e a Fig.~\ref{fig:2pc-faults} resumem a
-\emph{atomicidade} sob falhas. Com um participante derrubado, todas as
-transações abortam e os estados finais dos nós permanecem idênticos (nenhuma
-escrita parcial). Quando o coordenador cai logo após o \texttt{PREPARE}, os participantes ficam
-\emph{bloqueados} segurando travas. Nas cinco repetições, o protocolo de
-terminação concluiu com \texttt{ABORT} após o coordenador reiniciar, em média
-em 5,41\,s desde o envio da transação. Em todos os ensaios de falha, os estados
-observados convergiram e não houve escrita parcial.
+A Tabela~\ref{tab:2pc-faults} e a Fig.~\ref{fig:2pc-faults} resumem a garantia de \emph{atomicidade} sob falhas. Com um participante derrubado, 100\% das transações abortam e os estados finais dos nós permanecem rigorosamente idênticos, sem escritas parciais. Quando o coordenador cai logo após a fase de votação (\texttt{PREPARE}), os participantes permanecem bloqueados segurando suas travas locais. O protocolo de terminação conclui com aborto seguro após o coordenador reiniciar, resolvendo a transação em média em 5,41\,s desde o envio inicial e preservando o estado consistente do cluster.
 
 \begin{table}[!t]
 \centering
-\caption{2PC: resultados por cenário e atomicidade.}
+\caption{2PC: resultados por cenário e verificação de atomicidade.}
 \label{tab:2pc-faults}
 \input{tabelas/tab_2pc_faults.tex}
 \end{table}
@@ -460,55 +253,25 @@ observados convergiram e não houve escrita parcial.
 \begin{figure}[!t]
 \centering
 \includegraphics[width=0.95\columnwidth]{figures/fig8_2pc_faults.png}
-\caption{2PC: proporção de \texttt{COMMIT}/\texttt{ABORT} por cenário; o
-cenário de falha do coordenador evidencia o bloqueio até a terminação.}
+\caption{2PC: proporção de decisões por cenário, evidenciando o bloqueio temporário até a terminação quando o coordenador falha.}
 \label{fig:2pc-faults}
 \end{figure}
 
 \section{Limitações}
 \begin{itemize}
-    \item Os contêineres rodam em uma única máquina; portanto não constituem
-    domínios de falha independentes e compartilham CPU, disco e relógio. Os
-    tempos absolutos refletem esse ambiente.
-    \item Não foram modeladas partições de rede nem falhas bizantinas; o
-    detector pode gerar falsos positivos sob atrasos extremos.
-    \item O limiar de heartbeat fixo não se adapta à carga; detectores
-    adaptativos (por exemplo, $\phi$-accrual) reduziriam falsos positivos.
-    \item O tamanho máximo avaliado foi $N=5$, suficiente para evidenciar a
-    tendência quadrática, mas não para extrapolações.
-    \item As repetições foram feitas no mesmo host; as medições de falha e
-    recuperação reiniciam o nó afetado, e as de vazão do 2PC reutilizam o
-    cluster por configuração. A variação observada, sobretudo para $N=5$,
-    recomenda cautela ao generalizar a vazão.
-    \item O 2PC é bloqueante: a terminação cooperativa depende de os nós
-    estarem acessíveis e, por não haver \emph{log} persistente, um coordenador
-    que reinicie perde o contexto da transação (resolvida por \texttt{ABORT}).
+    \item Os contêineres executam em uma única máquina física e compartilham CPU, disco e relógio, de modo que os tempos absolutos refletem esse ambiente local compartilhado.
+    \item Não foram modeladas partições de rede nem falhas bizantinas, de forma que atrasos extremos de rede poderiam gerar falsos positivos no detector.
+    \item O limiar de batimento utilizado é fixo e não se adapta dinamicamente à carga do sistema, algo que modelos como o $\phi$-accrual contornariam.
+    \item O tamanho máximo avaliado foi de 5 nós, suficiente para ilustrar a curva quadrática, mas sem cobrir grandes escalas.
+    \item As repetições foram feitas no mesmo computador, com reinício de contêineres, devendo os números ser interpretados como medições demonstrativas do protótipo.
+    \item O 2PC é bloqueante por definição: sem arquivos de registro persistentes em disco (\emph{log}), o nó reiniciado perde o contexto e conclui por aborto.
 \end{itemize}
 
 \section{Conclusão}
-Este trabalho implementou e avaliou dois algoritmos distribuídos complementares
---- eleição de líder (Bully) e detecção de falhas por heartbeat --- em um
-cluster containerizado, além de um terceiro algoritmo de compromisso atômico
-(2PC) como bônus. A solução é assíncrona, reproduzível e instrumentada, e as
-propriedades de segurança, vivacidade e \emph{crash-recovery} foram verificadas
-por testes unitários e de integração. Nos ensaios, a reconvergência cresceu
-com o limiar de heartbeat e permaneceu entre 4,31\,s e 4,55\,s ao variar $N$
-de 3 a 5; o custo de mensagens seguiu a tendência $O(N^2)$. O nó de maior ID
-reassumiu a liderança em menos de um segundo neste ambiente. O 2PC efetivou
-100\% das transações em regime normal e preservou estados consistentes nos
-cenários de falha, mas evidenciou o bloqueio quando o coordenador cai entre as
-fases. Os resultados de desempenho, especialmente a vazão do 2PC para $N=5$,
-devem ser interpretados considerando a variabilidade e a execução em um único
-host. Como trabalhos futuros, sugerem-se ensaios com réplicas independentes,
-detectores adaptativos, \emph{log} persistente para o 2PC, cenários de partição
-e um protocolo não bloqueante (por exemplo, 3PC ou Paxos).
+Neste projeto, desenvolvemos e avaliamos dois algoritmos distribuídos clássicos que atuam em conjunto para assegurar a liderança estável em um cluster: a eleição pelo Algoritmo do Valentão e a detecção de quedas por batimentos periódicos de heartbeat, além de um protocolo de compromisso atômico Two-Phase Commit como bônus. A solução é assíncrona, reproduzível e instrumentada, com suas propriedades de segurança, vivacidade e recuperação verificadas por testes automatizados. Os ensaios práticos confirmaram que a reconvergência é dominada pelo limiar de batimento e pelo prazo de eleição, que as mensagens seguem a ordem $O(N^2)$ e que o líder original retoma o controle em menos de um segundo. O protocolo 2PC garantiu atomicidade em todos os testes, evidenciando de forma didática o bloqueio quando o coordenador falha. Como trabalhos futuros, sugerem-se detectores adaptativos, persistência em disco com log de operações e protocolos de consenso não bloqueantes, como Paxos ou Raft.
 
 \section{Divisão de Trabalho}
-\textbf{Matheus V. L.:} implementação do Algoritmo do Valentão, roteamento de
-mensagens e testes unitários. \textbf{Julio N. A.:} detector de heartbeat,
-tratamento de \emph{crash-recovery}, algoritmo de bônus (2PC), automação dos
-experimentos e geração de figuras/tabelas. Ambos participaram da modelagem, da
-análise dos resultados e da redação do relatório.
+\textbf{Matheus V. L.:} implementação do Algoritmo do Valentão, roteamento assíncrono de mensagens e testes unitários. \textbf{Julio N. A.:} detector de heartbeat, lógica de recuperação de nós, implementação do algoritmo bônus (2PC), automação dos experimentos e geração de tabelas e figuras. Ambos os integrantes participaram ativamente da modelagem teórica, da análise dos resultados e da redação deste relatório.
 
 \begin{thebibliography}{1}
 \bibitem{tanenbaum} M.~van~Steen and A.~S.~Tanenbaum, \emph{Distributed
