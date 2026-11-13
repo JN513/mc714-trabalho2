@@ -72,7 +72,7 @@ pela interface de rede da aplicação (TCP + JSON sobre `asyncio`).
 ## Pré-requisitos
 
 * **Docker Engine** (v20.10+) e **Docker Compose** (v2.0+)
-* **Python 3.11+** (para testes e análise): `pip install -r requirements.txt`
+* **Python 3.10+** (para testes e análise): `pip install -r requirements.txt`
 * **bash** e **curl**
 
 ---
@@ -123,7 +123,7 @@ pytest tests/ -v
   cooperativo (aborto, `COMMIT` quando alguém já efetivou e bloqueio com nó
   inacessível).
 
-A suíte completa tem **17 testes**.
+A suíte completa tem **20 testes**.
 
 ---
 
@@ -155,7 +155,8 @@ Executa, em sequência:
 1. `run_safety.py` — cenário normal: confirma um único líder e ausência de
    eleições espúrias;
 2. `run_experiments.py` — varia o limiar de heartbeat (`1, 2, 3, 5` s) e o
-   número de nós (`3, 4, 5`) com réplicas independentes, medindo tempo de
+   número de nós (`3, 4, 5`) em seis ciclos de falha/recuperação por
+   configuração, medindo tempo de
    reconvergência, decomposição detecção/eleição, número de mensagens e tempo de
    recuperação;
 3. `run_2pc.py` — bateria do bônus 2PC: vazão/latência de transações

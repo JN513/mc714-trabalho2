@@ -1,6 +1,6 @@
 scenario,n_nodes,rep,blocked,decision,resolution_s,atomic
-coordinator_crash,3,1,1,ABORT,5.473,1
-coordinator_crash,3,2,1,ABORT,5.473,1
-coordinator_crash,3,3,1,ABORT,5.363,1
-coordinator_crash,3,4,1,ABORT,5.151,1
-coordinator_crash,3,5,1,ABORT,5.469,1
+coordinator_crash,3,1,1,ABORT,5.395,1
+coordinator_crash,3,2,1,ABORT,5.420,1
+coordinator_crash,3,3,1,ABORT,5.402,1
+coordinator_crash,3,4,1,ABORT,5.406,1
+coordinator_crash,3,5,1,ABORT,5.419,1

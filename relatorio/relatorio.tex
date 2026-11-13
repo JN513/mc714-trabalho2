@@ -43,9 +43,8 @@ reconvergência, sua decomposição (detecção e eleição), a complexidade de
 mensagens e o tempo de recuperação, com percentis p50/p95 e intervalos de
 confiança de 95\%. Os resultados mostram que a reconvergência é dominada pela
 soma do limiar de detecção com a espera da eleição ($T_{hb}+T_{ele}$), que o
-custo de mensagens cresce de forma quadrática com $N$, e que o
-\emph{crash-recovery} restaura o líder de maior ID em tempo praticamente
-constante. Discute-se ainda uma armadilha de medição: o uso de
+custo de mensagens cresce de forma quadrática com $N$, e que a recuperação do líder ocorre em menos de um segundo neste ambiente.
+Discute-se ainda uma armadilha de medição: o uso de
 \texttt{docker stop} incluiria o \emph{grace period} de \qty{10}{\second}
 (ignorado pelo processo PID~1), inflando artificialmente os tempos. Como
 atividade de bônus, integra-se um terceiro algoritmo de \emph{compromisso
@@ -212,7 +211,7 @@ globais:
     \item \textbf{custo} --- o número de mensagens de uma eleição é limitado
     por $O(N^2)$.
 \end{itemize}
-A suíte completa (17 testes) executa com \texttt{pytest tests/ -v}. Os testes
+A suíte completa (20 testes) executa com \texttt{pytest tests/ -v}. Os testes
 do bônus (\texttt{test\_alg3.py}) cobrem as travas do armazenamento, os votos
 (\texttt{YES}/\texttt{NO} por conflito), a atomicidade sob conflito e sob voto
 negativo, e o protocolo de terminação cooperativo (aborto, \emph{commit} quando
@@ -272,7 +271,10 @@ Para cada algoritmo e cenário definiram-se métricas de desempenho relevantes:
 Todos os eventos relevantes são registrados nos logs com \emph{timestamp}
 \emph{epoch}, o que permite reconstruir os tempos sem depender da granularidade
 de sondagem. O instante da falha é registrado pelo próprio script em torno da
-chamada de \texttt{docker kill}. Uma observação importante de reprodutibilidade:
+chamada de \texttt{docker kill}. O tempo de detecção é o intervalo entre essa
+falha e o primeiro timeout registrado. Como o detector conta o timeout a partir
+do último heartbeat recebido, esse intervalo depende da fase em que a falha
+ocorre no ciclo de envio e pode ser menor que $T_{hb}$. Uma observação importante:
 os contêineres executam o Python como PID~1, que ignora \texttt{SIGTERM} por
 padrão; portanto usamos \texttt{docker kill} (SIGKILL imediato) em vez de
 \texttt{docker stop}, que aguardaria o \emph{grace period} de \qty{10}{\second}
@@ -289,12 +291,19 @@ Variou-se um parâmetro por vez em pelo menos três níveis:
     concorrentes (vazão/latência) e cenários de falha de participante e de
     coordenador.
 \end{itemize}
-Cada configuração foi repetida $n=6$ vezes (falha/recuperação) ou $n=5$
-(2PC) com execuções independentes (recriando o cluster). Reportam-se média,
-desvio, p50, p95 e intervalo de confiança de 95\% via $t$-Student. Os ensaios
-rodaram em uma única máquina Linux (Docker Engine 29.x, Compose v2, Python
-3.14), com duração de aquecimento de \qty{2.5}{\second} após a estabilização.
-Cada nó é um contêiner \texttt{python:3.11-slim}. Os experimentos são
+Cada configuração de falha/recuperação foi repetida seis vezes, reiniciando o
+nó que falhou entre os ciclos; as cinco repetições de vazão do 2PC usam
+transações distintas no mesmo cluster por configuração. Os cinco ensaios de
+falha do coordenador do 2PC recriam o cluster. Portanto, as repetições não
+representam máquinas independentes. Para falha/recuperação, reportam-se média,
+desvio, p50, p95 e intervalo de confiança de 95\% via $t$-Student; como os
+ciclos reutilizam o cluster, esses intervalos são indicativos. Para o 2PC,
+a tabela apresenta a mediana das cinco repetições e os percentis de latência
+medidos por transação. Os ensaios foram executados em uma máquina Pop!\_OS 22.04
+com processador Intel Core i5-12500H, 16\,GB de RAM, Docker Engine 29.1.5,
+Docker Compose 5.0.1 e Python 3.10.12 no host; os nós usam a imagem
+\texttt{python:3.11-slim}. Aguardaram-se 2,5\,s após a estabilização antes das
+baterias de falha e 2PC (3\,s no cenário normal). Os experimentos são
 automatizados por \texttt{experiments/run\_experiments.py} e
 \texttt{experiments/run\_2pc.py}, e analisados por \texttt{experiments/analyze.py}.
 
@@ -308,11 +317,14 @@ regime estável.
 
 \subsection{Reconvergência \emph{vs.} limiar de heartbeat}
 A Tabela~\ref{tab:timeout} e a Fig.~\ref{fig:timeout} mostram os resultados do
-Experimento~A. O tempo de reconvergência cresce de forma praticamente linear com
-$T_{hb}$, sendo bem descrito pelo modelo $T_{hb}+T_{ele}$: a detecção ocorre
-quase exatamente em $T_{hb}$ e a fase de eleição é estável em $T_{ele}
-\approx \qty{2}{\second}$ (resposta + anúncio), com variabilidade pequena. O
-valor de p95 permanece próximo da média, indicando previsibilidade.
+Experimento~A. O tempo de reconvergência cresce com $T_{hb}$. A detecção média variou de
+0,59\,s a 4,52\,s, enquanto a fase de eleição permaneceu em torno de 2,00\,s.
+Isso é esperado: após a queda, o detector aguarda o tempo restante desde o
+último heartbeat, e não um timeout completo iniciado no instante da falha.
+Assim, a soma do tempo de detecção observado com a espera de eleição explica
+as médias de reconvergência (de 2,60\,s a 6,52\,s). As barras de erro mostram
+intervalos de confiança de 95\%; com seis repetições, os p95 devem ser lidos
+como estimativas indicativas, não como garantias de cauda.
 
 \begin{table}[!t]
 \centering
@@ -331,11 +343,11 @@ comparada ao modelo $T_{hb}+T_{ele}$.}
 
 \subsection{Reconvergência e custo \emph{vs.} número de nós}
 A Tabela~\ref{tab:nos} e as Figs.~\ref{fig:nos}--\ref{fig:msgs} apresentam o
-Experimento~B. O tempo de reconvergência permanece aproximadamente constante em
-$N$ (a eleição é dominada pelo timeout e pela espera $T_{ele}$), enquanto o
-número de mensagens cresce de forma quadrática, coerente com a complexidade
+Experimento~B. O tempo médio de reconvergência variou pouco (de 4,31\,s a 4,55\,s) em
+$N$, enquanto o número de mensagens cresceu de 6 para 20. Os valores medidos
+seguem $N(N-1)$ nesses tamanhos, coerentes com a complexidade
 $O(N^2)$ do Algoritmo do Valentão: cada nó envia \texttt{ELECTION} a todos os
-pares de ID maior, gerando $O(N^2)$ mensagens no pior caso.
+pares de ID maior; no pior caso, a eleição pode gerar $O(N^2)$ mensagens.
 
 \begin{table}[!t]
 \centering
@@ -359,12 +371,13 @@ pares de ID maior, gerando $O(N^2)$ mensagens no pior caso.
 \end{figure}
 
 \subsection{Crash-recovery}
-A Tabela~\ref{tab:rec} e a Fig.~\ref{fig:rec} mostram o tempo até o nó de maior
-ID reassumir a liderança após reiniciar. O valor é praticamente constante e
-próximo do atraso de \emph{bootstrap} $T_{boot} = \qty{2}{\second}$, pois o nó
-que reinicia com o maior ID se proclama coordenador assim que o servidor TCP
-está pronto, sem depender de novo timeout. Isso confirma a vivacidade no modo
-\emph{crash-recovery}.
+A Tabela~\ref{tab:rec} e a Fig.~\ref{fig:rec} mostram o tempo entre reiniciar o
+nó de maior ID e seu anúncio como líder: a média ficou entre 0,75\,s e
+0,77\,s. Esse valor é menor que o atraso de bootstrap configurado em 2\,s
+porque, ao receber um heartbeat do líder provisório de ID inferior, o nó
+reiniciado já se considera o maior ID e reanuncia sua liderança. Portanto, a
+métrica captura essa reação, não o término do atraso de bootstrap. A recuperação
+foi semelhante para $N=3,4,5$ neste cenário.
 
 \begin{table}[!t]
 \centering
@@ -394,25 +407,25 @@ original.
 \end{figure}
 
 \subsection{Análise à luz da complexidade}
-Os resultados são coerentes com a teoria. O tempo de reconvergência tem dois
-componentes: a \emph{detecção}, limitada pelo modelo parcialmente síncrono
-($T_{hb} \le \text{detecção} \le T_{hb}+I$), e a \emph{eleição}, que executa em
-$O(1)$ rodadas de mensagens, mas com uma espera fixa $T_{ele}$ para descartar
-concorrentes. Já o custo de mensagens reflete a complexidade $O(N^2)$ do Bully,
-que é inerente ao algoritmo e não à implementação. Assim, aumentar $N$ não
-piora o tempo, mas aumenta o tráfego; reduzir $T_{hb}$ acelera a detecção ao
-custo de maior sensibilidade a atrasos e falsos positivos --- um clássico
-\emph{trade-off} de detectores de falhas.
+Os resultados são coerentes com o modelo implementado. A detecção ocorre entre
+zero e aproximadamente $T_{hb}$ após a falha, pois o relógio do detector já
+estava contando desde o último heartbeat; a eleição adiciona uma espera de
+cerca de 2\,s. A contagem de mensagens cresce quadraticamente nos tamanhos
+testados, como esperado para o Bully. Como os ensaios usam até cinco nós e seis
+repetições, eles ilustram essa tendência, mas não permitem extrapolações
+precisas. Reduzir $T_{hb}$ diminui a demora máxima para detectar a falha, mas
+aumenta a sensibilidade a atrasos e falsos positivos.
 
 \subsection{Resultados do 2PC (bônus)}
 A Tabela~\ref{tab:2pc-tp} e a Fig.~\ref{fig:2pc-tp} mostram a vazão e a
-latência do 2PC em função de $N$. Em regime normal todas as transações efetivam
-(taxa de \emph{commit} de 100\%). A \textbf{latência cresce com $N$} (p50 de
-$\approx\qty{36}{\milli\second}$ para $N=3$ até $\approx\qty{69}{\milli\second}$
-para $N=5$), pois o coordenador precisa coletar votos de mais participantes; o
-p95 permanece próximo do p50 (cauda curta), coerente com as duas rodadas de
-mensagens do protocolo. A vazão medida ($\approx\!265$ txn/s) é praticamente
-constante e limitada pelo cliente executando na mesma máquina.
+latência do 2PC em função de $N$. Nas 300 transações de cada configuração,
+100\% efetivaram. A mediana do p50 aumentou de 122\,ms ($N=3$) para 227\,ms
+($N=5$), compatível com o maior número de participantes consultados. A vazão
+mediana foi de 223,0 txn/s para $N=3$, 223,5 txn/s para $N=4$ e 123,1 txn/s
+para $N=5$. Neste último caso houve variação entre 118 e 227 txn/s nas cinco
+repetições; por isso, o resultado sugere uma queda nesse ambiente, mas não
+permite atribuí-la apenas ao custo do protocolo. O p95 de latência foi calculado
+por transação e resumido pela mediana entre repetições.
 
 \begin{table}[!t]
 \centering
@@ -431,12 +444,11 @@ constante e limitada pelo cliente executando na mesma máquina.
 A Tabela~\ref{tab:2pc-faults} e a Fig.~\ref{fig:2pc-faults} resumem a
 \emph{atomicidade} sob falhas. Com um participante derrubado, todas as
 transações abortam e os estados finais dos nós permanecem idênticos (nenhuma
-escrita parcial). Quando o coordenador cai logo após o \texttt{PREPARE}, os
-participantes ficam \emph{bloqueados} segurando travas; o protocolo de terminação
-só conclui (\texttt{ABORT}) quando o coordenador reinicia e volta a responder,
-resolvendo em $\approx\qty{5.5}{\second}$ (dominado pelo tempo de parada e pelo
-\emph{bootstrap}). Em todos os cenários os estados convergiram, confirmando a
-atomicidade.
+escrita parcial). Quando o coordenador cai logo após o \texttt{PREPARE}, os participantes ficam
+\emph{bloqueados} segurando travas. Nas cinco repetições, o protocolo de
+terminação concluiu com \texttt{ABORT} após o coordenador reiniciar, em média
+em 5,41\,s desde o envio da transação. Em todos os ensaios de falha, os estados
+observados convergiram e não houve escrita parcial.
 
 \begin{table}[!t]
 \centering
@@ -464,6 +476,10 @@ cenário de falha do coordenador evidencia o bloqueio até a terminação.}
     adaptativos (por exemplo, $\phi$-accrual) reduziriam falsos positivos.
     \item O tamanho máximo avaliado foi $N=5$, suficiente para evidenciar a
     tendência quadrática, mas não para extrapolações.
+    \item As repetições foram feitas no mesmo host; as medições de falha e
+    recuperação reiniciam o nó afetado, e as de vazão do 2PC reutilizam o
+    cluster por configuração. A variação observada, sobretudo para $N=5$,
+    recomenda cautela ao generalizar a vazão.
     \item O 2PC é bloqueante: a terminação cooperativa depende de os nós
     estarem acessíveis e, por não haver \emph{log} persistente, um coordenador
     que reinicie perde o contexto da transação (resolvida por \texttt{ABORT}).
@@ -475,16 +491,17 @@ Este trabalho implementou e avaliou dois algoritmos distribuídos complementares
 cluster containerizado, além de um terceiro algoritmo de compromisso atômico
 (2PC) como bônus. A solução é assíncrona, reproduzível e instrumentada, e as
 propriedades de segurança, vivacidade e \emph{crash-recovery} foram verificadas
-por testes unitários e de integração. Os experimentos automatizados mostraram
-que o tempo de reconvergência é governado por $T_{hb}+T_{ele}$, que o custo de
-mensagens é $O(N^2)$ e que o \emph{crash-recovery} restaura o líder de maior ID
-em tempo praticamente constante. O 2PC efetivou 100\% das transações em regime
-normal e preservou a atomicidade sob falhas, mas evidenciou o clássico problema
-de bloqueio quando o coordenador cai entre as fases. Destacou-se, ainda, uma
-armadilha de medição (\texttt{docker stop} \emph{vs.} \texttt{docker kill}) que,
-se ignorada, inflaria os tempos em \qty{10}{\second}. Como trabalhos futuros,
-sugerem-se detectores adaptativos, \emph{log} persistente para o 2PC, cenários de
-partição e um protocolo não-bloqueante (por exemplo, 3PC ou Paxos).
+por testes unitários e de integração. Nos ensaios, a reconvergência cresceu
+com o limiar de heartbeat e permaneceu entre 4,31\,s e 4,55\,s ao variar $N$
+de 3 a 5; o custo de mensagens seguiu a tendência $O(N^2)$. O nó de maior ID
+reassumiu a liderança em menos de um segundo neste ambiente. O 2PC efetivou
+100\% das transações em regime normal e preservou estados consistentes nos
+cenários de falha, mas evidenciou o bloqueio quando o coordenador cai entre as
+fases. Os resultados de desempenho, especialmente a vazão do 2PC para $N=5$,
+devem ser interpretados considerando a variabilidade e a execução em um único
+host. Como trabalhos futuros, sugerem-se ensaios com réplicas independentes,
+detectores adaptativos, \emph{log} persistente para o 2PC, cenários de partição
+e um protocolo não bloqueante (por exemplo, 3PC ou Paxos).
 
 \section{Divisão de Trabalho}
 \textbf{Matheus V. L.:} implementação do Algoritmo do Valentão, roteamento de
