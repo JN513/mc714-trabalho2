@@ -13,7 +13,7 @@ logs:
 
 # Testes unitários e de integração
 test:
-	pytest tests/ -v
+	@if command -v pytest >/dev/null 2>&1; then pytest tests/ -v; else python3 -m unittest discover -s tests -v; fi
 
 # Bateria experimental completa (requer Docker)
 experiments:

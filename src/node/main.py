@@ -29,7 +29,7 @@ if PEERS_RAW:
             # Formato explícito: ID:HOST:PORT (ex: 2:node2:5000)
             PEERS[int(parts[0])] = (parts[1], int(parts[2]))
         elif len(parts) == 2:
-            # Formato reduzido: HOST:PORT (ex: node2:5000) -> extrai ID do nome do host
+            # Formato reduzido: HOST:PORT (ex: node2:5000) -> extrai ID do hostname
             host, port = parts[0], int(parts[1])
             node_id = int("".join(filter(str.isdigit, host)))
             PEERS[node_id] = (host, port)
@@ -43,18 +43,40 @@ async def route_message(msg: dict):
     msg_type = msg.get("type")
     sender_id = msg.get("sender_id")
 
-    # --- Eleição (Bully) e detecção de falhas (Heartbeat) ---
+    if not msg_type:
+        return
+
+    # --- Eleição (Bully) e Detecção de Falhas (Heartbeat) ---
     if msg_type == "HEARTBEAT":
-        if sender_id == bully.leader_id:
+        if sender_id is not None and sender_id < NODE_ID:
+            # Nó inferior enviando heartbeat indevidamente: desafia ou reanuncia
+            if bully.is_leader():
+                asyncio.create_task(bully._announce_coordination())
+            elif not bully.is_electing:
+                logging.info(
+                    f"Node {NODE_ID}: Recebeu heartbeat de nó inferior ({sender_id}). Disparando eleição."
+                )
+                asyncio.create_task(bully.start_election())
+        elif sender_id == bully.leader_id:
             hb_detector.update_heartbeat_timestamp()
+        elif sender_id is not None and sender_id > (bully.leader_id or 0):
+            # Líder legítimo com ID superior reconhecido
+            bully.abdicate_if_higher_leader(sender_id)
+            await bully.handle_coordinator_msg(sender_id, hb_detector)
+
     elif msg_type == "ELECTION":
-        await bully.handle_election_msg(sender_id)
+        if sender_id is not None:
+            await bully.handle_election_msg(sender_id)
+
     elif msg_type == "ANSWER":
         await bully.handle_answer_msg()
-    elif msg_type == "COORDINATOR":
-        await bully.handle_coordinator_msg(sender_id, hb_detector)
 
-    # --- Compromisso atômico (2PC) ---
+    elif msg_type == "COORDINATOR":
+        if sender_id is not None:
+            bully.abdicate_if_higher_leader(sender_id)
+            await bully.handle_coordinator_msg(sender_id, hb_detector)
+
+    # --- Compromisso Atômico (Two-Phase Commit / 2PC - Bônus) ---
     elif msg_type == "TXN":
         await tpc.handle_client_txn(msg.get("ops", []), sender_id)
     elif msg_type == "PREPARE":
@@ -99,9 +121,9 @@ async def main():
         hb_detector.run_checker(
             bully.is_leader, lambda: bully.is_electing, bully.start_election
         ),
-        # Eleição de inicialização/recuperação (crash-recovery).
+        # Inicialização e recuperação ordenada (crash-recovery)
         bully.bootstrap(BOOTSTRAP_DELAY),
-        # Protocolo de terminação cooperativo do 2PC.
+        # Monitor de terminação cooperativo do 2PC
         tpc.run_termination_monitor(),
     )
 

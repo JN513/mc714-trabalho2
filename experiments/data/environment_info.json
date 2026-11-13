@@ -1,0 +1,15 @@
+{
+  "testbed": {
+    "processor": "12th Gen Intel(R) Core(TM) i5-12500H (16 vCPUs)",
+    "memory_ram": "16 GB (16025216 kB)",
+    "operating_system": "Linux 6.16.3-generic x86_64",
+    "distribution": "Ubuntu 22.04 LTS (Jammy Jellyfish)",
+    "container_runtime": "Docker Engine v29.1.5 (build 0e6fee6)",
+    "orchestrator": "Docker Compose v5.0.1",
+    "programming_language": "Python 3.11 (OCI python:3.11-slim)",
+    "networking": "Docker Bridge Network (ds-net, MTU 1500, TCP/IP)",
+    "warmup_seconds": 3.0,
+    "timestamp_utc": "2026-11-08T18:00:00Z"
+  }
+}
+

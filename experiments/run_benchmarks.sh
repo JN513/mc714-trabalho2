@@ -6,8 +6,7 @@
 # variando o limiar de heartbeat e o número de nós), gera os CSVs em
 # experiments/data/ e depois produz as figuras do relatório.
 #
-# Requisitos: Docker Engine + Docker Compose v2 e Python 3 com as dependências
-# de requirements.txt (pip install -r requirements.txt).
+# Requisitos: Docker Engine + Docker Compose v2 e Python 3.
 set -e
 
 cd "$(dirname "$0")/.."

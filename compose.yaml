@@ -6,6 +6,8 @@ services:
       - NODE_ID=1
       - PORT=5000
       - PEERS=2:node2:5000,3:node3:5000
+      - HEARTBEAT_INTERVAL=${HEARTBEAT_INTERVAL:-1.0}
+      - HEARTBEAT_TIMEOUT=${HEARTBEAT_TIMEOUT:-3.0}
     networks:
       - ds-net
 
@@ -16,6 +18,8 @@ services:
       - NODE_ID=2
       - PORT=5000
       - PEERS=1:node1:5000,3:node3:5000
+      - HEARTBEAT_INTERVAL=${HEARTBEAT_INTERVAL:-1.0}
+      - HEARTBEAT_TIMEOUT=${HEARTBEAT_TIMEOUT:-3.0}
     networks:
       - ds-net
 
@@ -26,6 +30,8 @@ services:
       - NODE_ID=3
       - PORT=5000
       - PEERS=1:node1:5000,2:node2:5000
+      - HEARTBEAT_INTERVAL=${HEARTBEAT_INTERVAL:-1.0}
+      - HEARTBEAT_TIMEOUT=${HEARTBEAT_TIMEOUT:-3.0}
     networks:
       - ds-net
 
