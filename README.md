@@ -196,5 +196,5 @@ terminação cooperativo resolve a transação quando o coordenador reinicia
 ## Autores e Entrega
 
 * **Alunos:** Matheus Veiga Luchi (269494) e Julio Nunes Avelar (241163)
-* **Link para o Vídeo de Demonstração:** _(preencher)_
+* **Link para o Vídeo de Demonstração:** https://youtu.be/0gTKYpGg61c
 * **Link para o Repositório:** https://github.com/JN513/mc714-trabalho2
